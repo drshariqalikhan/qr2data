@@ -1,0 +1,17 @@
+{
+  "name": "QR Data Stream",
+  "short_name": "QR Stream",
+  "description": "Transfer data via animated QR codes.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#2c3e50",
+  "theme_color": "#3498db",
+  "icons": [
+    {
+      "src": "https://www.shareicon.net/data/512x512/2015/10/02/650095_qr_512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

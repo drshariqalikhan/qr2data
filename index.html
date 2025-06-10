@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+
+    <!-- PWA & iOS Meta Tags -->
+    <meta name="theme-color" content="#3498db"/>
+    <link rel="manifest" href="manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="QR Stream">
+    <link rel="apple-touch-icon" href="https://www.shareicon.net/data/512x512/2015/10/02/650095_qr_512x512.png">
+
+    <title>QR Data Stream</title>
+
+    <!-- CDN Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+
+    <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --light-color: #ecf0f1;
+            --dark-color: #222;
+            --success-color: #2ecc71;
+            --error-color: #e74c3c;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--dark-color);
+            color: var(--light-color);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .container {
+            padding: 15px;
+            text-align: center;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .view { display: none; flex-grow: 1; display: flex; flex-direction: column; justify-content: center; }
+        .view.active { display: flex; }
+        .mode-selector { padding-bottom: 15px; border-bottom: 1px solid #444; }
+        
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 5px;
+            transition: background-color 0.2s;
+        }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #7f8c8d; cursor: not-allowed; }
+
+        #qr-code-container {
+            background-color: white;
+            padding: 20px;
+            margin: 20px auto;
+            border-radius: 8px;
+            width: fit-content;
+        }
+        #qr-canvas { max-width: 100%; height: auto; }
+
+        #decoder-view { position: relative; }
+        #video-feed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 1;
+        }
+        #decoder-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent, rgba(0,0,0,0.6));
+        }
+        #decoder-status {
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000;
+        }
+
+        #log-container {
+            background-color: #1a1a1a;
+            height: 150px;
+            overflow-y: auto;
+            border-top: 1px solid #444;
+            padding: 10px;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 12px;
+            text-align: left;
+            flex-shrink: 0;
+        }
+        .log-entry { margin-bottom: 5px; }
+        .log-info { color: var(--light-color); }
+        .log-success { color: var(--success-color); }
+        .log-error { color: var(--error-color); }
+        .log-warn { color: #f39c12; }
+    </style>
+</head>
+<body>
+    <div class="container" id="main-container">
+        <div class="mode-selector">
+            <button id="show-encoder">Encoder (Laptop)</button>
+            <button id="show-decoder">Decoder (iPhone)</button>
+        </div>
+
+        <!-- Encoder View -->
+        <div id="encoder-view" class="view">
+            <h2>Encoder</h2>
+            <button id="start-encoding-btn">Load Dictionary & Start Encoding</button>
+            <div id="qr-code-container" style="display: none;">
+                <canvas id="qr-canvas"></canvas>
+            </div>
+            <p id="encoder-status">Ready to encode.</p>
+        </div>
+
+        <!-- Decoder View -->
+        <div id="decoder-view" class="view">
+             <video id="video-feed" playsinline></video>
+             <canvas id="hidden-canvas" style="display: none;"></canvas>
+             <div id="decoder-overlay">
+                <div>
+                    <h2 style="margin:0; text-shadow: 2px 2px 4px #000;">Decoder</h2>
+                    <p id="decoder-status">Point camera at QR stream</p>
+                </div>
+                <div>
+                     <button id="start-decoding-btn">Start Camera</button>
+                     <button id="download-btn" disabled>Download Decoded File</button>
+                </div>
+             </div>
+        </div>
+    </div>
+    <div id="log-container">
+        <div class="log-entry log-info">Welcome! Select a mode to begin.</div>
+    </div>
+
+    <script>
+        // --- Globals and Constants ---
+        const DICTIONARY_URL = 'https://raw.githubusercontent.com/matthewreagan/WebstersEnglishDictionary/master/dictionary.json';
+        const CHUNK_SIZE = 500; // Bytes. Lower for better reliability on small screens.
+        const FRAME_RATE = 5; // FPS. Lower for easier scanning.
+        
+        let currentState = {
+            isEncoding: false,
+            isDecoding: false,
+            chunks: [],
+            receivedChunks: new Map(),
+            totalChunks: 0,
+            fileHash: '',
+            animationFrameId: null,
+            decodedFileBlob: null
+        };
+        
+        // --- DOM Elements ---
+        const UIElements = {
+            encoderView: document.getElementById('encoder-view'),
+            decoderView: document.getElementById('decoder-view'),
+            showEncoderBtn: document.getElementById('show-encoder'),
+            showDecoderBtn: document.getElementById('show-decoder'),
+            startEncodingBtn: document.getElementById('start-encoding-btn'),
+            qrContainer: document.getElementById('qr-code-container'),
+            qrCanvas: document.getElementById('qr-canvas'),
+            encoderStatus: document.getElementById('encoder-status'),
+            startDecodingBtn: document.getElementById('start-decoding-btn'),
+            videoFeed: document.getElementById('video-feed'),
+            hiddenCanvas: document.getElementById('hidden-canvas'),
+            decoderStatus: document.getElementById('decoder-status'),
+            downloadBtn: document.getElementById('download-btn'),
+            logContainer: document.getElementById('log-container')
+        };
+        
+        // --- PWA Service Worker Registration ---
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(reg => log('Service Worker registered.', 'success'))
+                    .catch(err => log(`Service Worker registration failed: ${err}`, 'error'));
+            });
+        }
+
+        // --- Utility Functions ---
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            UIElements.logContainer.appendChild(entry);
+            UIElements.logContainer.scrollTop = UIElements.logContainer.scrollHeight;
+            console[type === 'error' ? 'error' : 'log'](message);
+        }
+
+        async function generateSHA256(data) {
+            const buffer = await crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // --- UI Mode Switching ---
+        function switchMode(mode) {
+            UIElements.encoderView.classList.remove('active');
+            UIElements.decoderView.classList.remove('active');
+            if (mode === 'encoder') {
+                UIElements.encoderView.classList.add('active');
+                log('Switched to Encoder mode.');
+            } else if (mode === 'decoder') {
+                UIElements.decoderView.classList.add('active');
+                log('Switched to Decoder mode.');
+            }
+        }
+        UIElements.showEncoderBtn.onclick = () => switchMode('encoder');
+        UIElements.showDecoderBtn.onclick = () => switchMode('decoder');
+
+        // --- Encoder Logic ---
+        async function startEncoding() {
+            if (currentState.isEncoding) return;
+            currentState.isEncoding = true;
+            UIElements.startEncodingBtn.disabled = true;
+            log('Starting encoding process...');
+
+            try {
+                // 1. Fetch data
+                log(`Fetching dictionary from ${DICTIONARY_URL}...`);
+                UIElements.encoderStatus.textContent = 'Downloading dictionary...';
+                const response = await fetch(DICTIONARY_URL);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const textData = await response.text();
+                log('Dictionary downloaded.', 'success');
+                
+                // 2. Compress data
+                UIElements.encoderStatus.textContent = 'Compressing data...';
+                const compressedData = pako.deflate(textData);
+                log(`Data compressed from ${textData.length} to ${compressedData.length} bytes.`, 'success');
+
+                // 3. Generate hash
+                currentState.fileHash = await generateSHA256(compressedData);
+                log(`File hash (SHA-256): ${currentState.fileHash.substring(0, 16)}...`);
+                
+                // 4. Chunk data
+                for (let i = 0; i < compressedData.length; i += CHUNK_SIZE) {
+                    currentState.chunks.push(compressedData.slice(i, i + CHUNK_SIZE));
+                }
+                currentState.totalChunks = currentState.chunks.length;
+                log(`Data split into ${currentState.totalChunks} chunks.`);
+                
+                // 5. Start animation
+                UIElements.qrContainer.style.display = 'block';
+                displayNextChunk(0);
+
+            } catch (error) {
+                log(`Encoding failed: ${error.message}`, 'error');
+                UIElements.encoderStatus.textContent = `Error: ${error.message}`;
+                currentState.isEncoding = false;
+                UIElements.startEncodingBtn.disabled = false;
+            }
+        }
+
+        function displayNextChunk(index) {
+            if (index >= currentState.totalChunks) {
+                log('Finished streaming all chunks. Looping.', 'warn');
+                index = 0; // Loop forever
+            }
+
+            const chunk = currentState.chunks[index];
+            const payload = btoa(String.fromCharCode.apply(null, chunk));
+            const packet = `${currentState.totalChunks}:${index}:${currentState.fileHash}:${payload}`;
+            
+            new QRious({
+                element: UIElements.qrCanvas,
+                value: packet,
+                size: Math.min(window.innerWidth * 0.8, window.innerHeight * 0.5, 300),
+                level: 'L' // Low error correction for max data
+            });
+
+            UIElements.encoderStatus.textContent = `Displaying chunk ${index + 1} of ${currentState.totalChunks}`;
+
+            setTimeout(() => {
+                if (currentState.isEncoding) {
+                    displayNextChunk(index + 1);
+                }
+            }, 1000 / FRAME_RATE);
+        }
+
+        UIElements.startEncodingBtn.onclick = startEncoding;
+
+        // --- Decoder Logic ---
+        async function startDecoding() {
+            if (currentState.isDecoding) return;
+            log('Attempting to start camera...');
+            
+            const constraints = {
+                video: { facingMode: 'environment' } // Use back camera on phones
+            };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                UIElements.videoFeed.srcObject = stream;
+                UIElements.videoFeed.play();
+                currentState.isDecoding = true;
+                UIElements.startDecodingBtn.disabled = true;
+                log('Camera started successfully.', 'success');
+                
+                // Start the decoding loop
+                currentState.animationFrameId = requestAnimationFrame(decodeFrame);
+            } catch (err) {
+                log(`Camera access denied or unavailable: ${err.name}`, 'error');
+                UIElements.decoderStatus.textContent = 'Camera permission needed!';
+            }
+        }
+        
+        function decodeFrame() {
+            if (!currentState.isDecoding) return;
+
+            if (UIElements.videoFeed.readyState === UIElements.videoFeed.HAVE_ENOUGH_DATA) {
+                const canvas = UIElements.hiddenCanvas;
+                const ctx = canvas.getContext('2d');
+                canvas.height = UIElements.videoFeed.videoHeight;
+                canvas.width = UIElements.videoFeed.videoWidth;
+                ctx.drawImage(UIElements.videoFeed, 0, 0, canvas.width, canvas.height);
+                
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const code = jsQR(imageData.data, imageData.width, imageData.height, {
+                    inversionAttempts: "dontInvert",
+                });
+
+                if (code) {
+                    processDecodedPacket(code.data);
+                }
+            }
+            currentState.animationFrameId = requestAnimationFrame(decodeFrame);
+        }
+
+        function processDecodedPacket(packet) {
+            try {
+                const parts = packet.split(':');
+                if (parts.length !== 4) return; // Malformed packet
+
+                const [total, indexStr, hash, payload] = parts;
+                const index = parseInt(indexStr, 10);
+                
+                if (currentState.totalChunks === 0) {
+                    currentState.totalChunks = parseInt(total, 10);
+                    currentState.fileHash = hash;
+                    log(`Discovered stream: ${currentState.totalChunks} total chunks.`);
+                }
+                
+                if (!currentState.receivedChunks.has(index)) {
+                    if (navigator.vibrate) navigator.vibrate(50); // Haptic feedback on new chunk
+                    
+                    const binaryString = atob(payload);
+                    const chunkData = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        chunkData[i] = binaryString.charCodeAt(i);
+                    }
+
+                    currentState.receivedChunks.set(index, chunkData);
+                    const progress = (currentState.receivedChunks.size / currentState.totalChunks) * 100;
+                    UIElements.decoderStatus.innerHTML = `Progress: ${currentState.receivedChunks.size} / ${currentState.totalChunks} chunks<br>${progress.toFixed(1)}% complete`;
+                    log(`Received chunk ${index + 1}. Progress: ${progress.toFixed(1)}%`);
+
+                    if (currentState.receivedChunks.size === currentState.totalChunks) {
+                        finishDecoding();
+                    }
+                }
+            } catch (e) {
+                log(`Error processing packet: ${e.message}`, 'warn');
+            }
+        }
+        
+        async function finishDecoding() {
+            log('All chunks received! Assembling file...', 'success');
+            currentState.isDecoding = false;
+            cancelAnimationFrame(currentState.animationFrameId);
+            UIElements.videoFeed.srcObject.getTracks().forEach(track => track.stop());
+
+            const sortedChunks = [];
+            for (let i = 0; i < currentState.totalChunks; i++) {
+                sortedChunks.push(currentState.receivedChunks.get(i));
+            }
+
+            // Combine chunks into a single Uint8Array
+            const totalLength = sortedChunks.reduce((acc, val) => acc + val.length, 0);
+            const compressedData = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of sortedChunks) {
+                compressedData.set(chunk, offset);
+                offset += chunk.length;
+            }
+
+            // Verify hash
+            UIElements.decoderStatus.textContent = 'Verifying file integrity...';
+            const receivedHash = await generateSHA256(compressedData);
+
+            if (receivedHash === currentState.fileHash) {
+                log('Hash verification successful!', 'success');
+                // Decompress
+                UIElements.decoderStatus.textContent = 'Decompressing...';
+                const originalData = pako.inflate(compressedData, { to: 'string' });
+                currentState.decodedFileBlob = new Blob([originalData], { type: 'application/json' });
+                
+                const url = URL.createObjectURL(currentState.decodedFileBlob);
+                UIElements.downloadBtn.disabled = false;
+                UIElements.downloadBtn.onclick = () => {
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'dictionary.json';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                };
+                UIElements.decoderStatus.innerHTML = `File ready! (${(currentState.decodedFileBlob.size / 1024 / 1024).toFixed(2)} MB)<br>Click Download.`;
+            } else {
+                log('HASH MISMATCH! Data is corrupted.', 'error');
+                log(`Expected: ${currentState.fileHash.substring(0, 16)}...`);
+                log(`Received: ${receivedHash.substring(0, 16)}...`);
+                UIElements.decoderStatus.textContent = 'Verification Failed! Data corrupted.';
+            }
+        }
+
+        UIElements.startDecodingBtn.onclick = startDecoding;
+
+        // --- Initial setup ---
+        switchMode('encoder'); // Default to encoder view
+    </script>
+</body>
+</html>
