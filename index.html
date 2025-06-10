@@ -462,7 +462,7 @@
                 };
                 UIElements.decoderStatus.innerHTML = `File ready! (${(currentState.decodedFileBlob.size / 1024).toFixed(1)} KB)<br>Click Download.`;
             } else {
-                log('HASH MISMATCH! Data is corrupted.', 'error');
+                log('HASH MISATCH! Data is corrupted.', 'error');
                 UIElements.decoderStatus.textContent = 'Verification Failed!';
             }
         }
