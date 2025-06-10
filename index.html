@@ -44,7 +44,7 @@
         }
         .main-content {
             flex-grow: 1;
-            display: flex; /* This allows the view to fill the space */
+            display: flex;
             flex-direction: column;
         }
         .view { display: none; }
@@ -52,7 +52,7 @@
             display: flex;
             flex-direction: column;
             justify-content: center;
-            flex-grow: 1; /* Make the active view fill the main content area */
+            flex-grow: 1;
             padding: 15px;
             text-align: center;
         }
@@ -81,10 +81,9 @@
         }
         #qr-canvas { max-width: 100%; height: auto; }
 
-        /* --- DECODER FULL-SCREEN STYLES --- */
         #decoder-view.active {
-            position: relative; /* Crucial for child absolute positioning */
-            padding: 0; /* Remove padding to allow video to be edge-to-edge */
+            position: relative;
+            padding: 0;
         }
         #video-feed {
             position: absolute;
@@ -92,7 +91,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            object-fit: cover; /* This makes the video fill the screen without distortion */
+            object-fit: cover;
             z-index: 1;
             background-color: #111;
         }
@@ -117,7 +116,6 @@
         }
         #decoder-status { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
 
-        /* --- PROGRESS BAR STYLES --- */
         #progress-container {
             width: 100%;
             background-color: rgba(0, 0, 0, 0.5);
@@ -131,7 +129,7 @@
             height: 100%;
             background-color: var(--success-color);
             border-radius: 8px;
-            transition: width 0.2s ease-out; /* Smooth animation */
+            transition: width 0.2s ease-out;
         }
 
         #log-container {
@@ -163,7 +161,11 @@
             <!-- Encoder View -->
             <div id="encoder-view" class="view">
                 <h2>Encoder</h2>
-                <button id="start-encoding-btn">Load Dictionary & Start Encoding</button>
+                <p>Choose a data source to begin streaming:</p>
+                <div>
+                    <button id="encode-story-btn">Encode Short Story (~35 KB)</button>
+                    <button id="encode-dict-btn">Encode Dictionary (~25 MB)</button>
+                </div>
                 <div id="qr-code-container" style="display: none;">
                     <canvas id="qr-canvas"></canvas>
                 </div>
@@ -196,7 +198,16 @@
 
     <script>
         // --- Globals and Constants ---
-        const DICTIONARY_URL = 'https://raw.githubusercontent.com/matthewreagan/WebstersEnglishDictionary/master/dictionary.json';
+        const DATA_SOURCES = {
+            story: {
+                name: 'Short Story',
+                url: 'https://raw.githubusercontent.com/Bartleby/project-gutenberg-corpus/master/pg1/3/30/3057/3057.txt'
+            },
+            dictionary: {
+                name: 'Dictionary',
+                url: 'https://raw.githubusercontent.com/matthewreagan/WebstersEnglishDictionary/master/dictionary.json'
+            }
+        };
         const CHUNK_SIZE = 500;
         const FRAME_RATE = 5;
         
@@ -208,7 +219,8 @@
             totalChunks: 0,
             fileHash: '',
             animationFrameId: null,
-            decodedFileBlob: null
+            decodedFileBlob: null,
+            decodedFileName: 'decoded_file.txt'
         };
         
         // --- DOM Elements ---
@@ -217,7 +229,8 @@
             decoderView: document.getElementById('decoder-view'),
             showEncoderBtn: document.getElementById('show-encoder'),
             showDecoderBtn: document.getElementById('show-decoder'),
-            startEncodingBtn: document.getElementById('start-encoding-btn'),
+            encodeStoryBtn: document.getElementById('encode-story-btn'),
+            encodeDictBtn: document.getElementById('encode-dict-btn'),
             qrContainer: document.getElementById('qr-code-container'),
             qrCanvas: document.getElementById('qr-canvas'),
             encoderStatus: document.getElementById('encoder-status'),
@@ -234,9 +247,7 @@
         // --- PWA Service Worker Registration ---
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js')
-                    .then(reg => log('Service Worker registered.', 'success'))
-                    .catch(err => log(`Service Worker registration failed: ${err}`, 'error'));
+                navigator.serviceWorker.register('./sw.js').then(reg => log('Service Worker registered.', 'success')).catch(err => log(`Service Worker registration failed: ${err}`, 'error'));
             });
         }
 
@@ -247,7 +258,6 @@
             entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
             UIElements.logContainer.appendChild(entry);
             UIElements.logContainer.scrollTop = UIElements.logContainer.scrollHeight;
-            console[type === 'error' ? 'error' : 'log'](message);
         }
 
         async function generateSHA256(data) {
@@ -266,44 +276,41 @@
             UIElements.downloadBtn.disabled = true;
             UIElements.startDecodingBtn.disabled = false;
         }
+        
+        function setEncodingButtonsState(disabled) {
+            UIElements.encodeStoryBtn.disabled = disabled;
+            UIElements.encodeDictBtn.disabled = disabled;
+        }
 
         // --- UI Mode Switching ---
         function switchMode(mode) {
-            UIElements.encoderView.classList.remove('active');
-            UIElements.decoderView.classList.remove('active');
             if (currentState.isDecoding) {
                 currentState.isDecoding = false;
                 cancelAnimationFrame(currentState.animationFrameId);
-                if (UIElements.videoFeed.srcObject) {
-                    UIElements.videoFeed.srcObject.getTracks().forEach(track => track.stop());
-                }
+                if (UIElements.videoFeed.srcObject) UIElements.videoFeed.srcObject.getTracks().forEach(track => track.stop());
             }
-            if (mode === 'encoder') {
-                UIElements.encoderView.classList.add('active');
-                log('Switched to Encoder mode.');
-            } else if (mode === 'decoder') {
-                UIElements.decoderView.classList.add('active');
-                resetDecoderState();
-                log('Switched to Decoder mode.');
-            }
+            UIElements.encoderView.classList.toggle('active', mode === 'encoder');
+            UIElements.decoderView.classList.toggle('active', mode === 'decoder');
+            if (mode === 'decoder') resetDecoderState();
+            log(`Switched to ${mode.charAt(0).toUpperCase() + mode.slice(1)} mode.`);
         }
         UIElements.showEncoderBtn.onclick = () => switchMode('encoder');
         UIElements.showDecoderBtn.onclick = () => switchMode('decoder');
 
         // --- Encoder Logic ---
-        async function startEncoding() {
+        async function startEncoding(source) {
             if (currentState.isEncoding) return;
             currentState.isEncoding = true;
-            UIElements.startEncodingBtn.disabled = true;
-            log('Starting encoding process...');
+            setEncodingButtonsState(true);
+            log(`Starting encoding process for: ${source.name}`);
 
             try {
-                log(`Fetching dictionary from remote source...`);
-                UIElements.encoderStatus.textContent = 'Downloading dictionary...';
-                const response = await fetch(DICTIONARY_URL);
+                log(`Fetching ${source.name} from remote source...`);
+                UIElements.encoderStatus.textContent = `Downloading ${source.name}...`;
+                const response = await fetch(source.url);
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const textData = await response.text();
-                log('Dictionary downloaded.', 'success');
+                log(`${source.name} downloaded.`, 'success');
                 
                 UIElements.encoderStatus.textContent = 'Compressing data...';
                 const compressedData = pako.deflate(textData);
@@ -317,7 +324,9 @@
                     currentState.chunks.push(compressedData.slice(i, i + CHUNK_SIZE));
                 }
                 currentState.totalChunks = currentState.chunks.length;
-                log(`Data split into ${currentState.totalChunks} chunks.`);
+                const fileExtension = source.url.split('.').pop();
+                currentState.decodedFileName = `${source.name.replace(/\s+/g, '_')}.${fileExtension}`;
+                log(`Data split into ${currentState.totalChunks} chunks. Output will be named ${currentState.decodedFileName}`);
                 
                 UIElements.qrContainer.style.display = 'block';
                 displayNextChunk(0);
@@ -326,18 +335,19 @@
                 log(`Encoding failed: ${error.message}`, 'error');
                 UIElements.encoderStatus.textContent = `Error: ${error.message}`;
                 currentState.isEncoding = false;
-                UIElements.startEncodingBtn.disabled = false;
+                setEncodingButtonsState(false);
             }
         }
+        
+        UIElements.encodeStoryBtn.onclick = () => startEncoding(DATA_SOURCES.story);
+        UIElements.encodeDictBtn.onclick = () => startEncoding(DATA_SOURCES.dictionary);
 
         function displayNextChunk(index) {
-            if (index >= currentState.totalChunks) {
-                index = 0; // Loop forever
-            }
+            if (index >= currentState.totalChunks) index = 0;
 
             const chunk = currentState.chunks[index];
             const payload = btoa(String.fromCharCode.apply(null, chunk));
-            const packet = `${currentState.totalChunks}:${index}:${currentState.fileHash}:${payload}`;
+            const packet = `${currentState.totalChunks}:${index}:${currentState.fileHash}:${currentState.decodedFileName}:${payload}`;
             
             new QRious({
                 element: UIElements.qrCanvas,
@@ -345,17 +355,9 @@
                 size: Math.min(window.innerWidth * 0.8, window.innerHeight * 0.5, 300),
                 level: 'L'
             });
-
-            UIElements.encoderStatus.textContent = `Displaying chunk ${index + 1} of ${currentState.totalChunks}`;
-
-            setTimeout(() => {
-                if (currentState.isEncoding) {
-                    displayNextChunk(index + 1);
-                }
-            }, 1000 / FRAME_RATE);
+            UIElements.encoderStatus.textContent = `Streaming ${currentState.decodedFileName} - Chunk ${index + 1} of ${currentState.totalChunks}`;
+            setTimeout(() => { if (currentState.isEncoding) displayNextChunk(index + 1); }, 1000 / FRAME_RATE);
         }
-
-        UIElements.startEncodingBtn.onclick = startEncoding;
 
         // --- Decoder Logic ---
         async function startDecoding() {
@@ -363,15 +365,13 @@
             resetDecoderState();
             log('Attempting to start camera...');
             
-            const constraints = { video: { facingMode: 'environment' } };
             try {
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 UIElements.videoFeed.srcObject = stream;
                 UIElements.videoFeed.play();
                 currentState.isDecoding = true;
                 UIElements.startDecodingBtn.disabled = true;
                 log('Camera started successfully.', 'success');
-                
                 currentState.animationFrameId = requestAnimationFrame(decodeFrame);
             } catch (err) {
                 log(`Camera access denied or unavailable: ${err.name}`, 'error');
@@ -381,20 +381,15 @@
         
         function decodeFrame() {
             if (!currentState.isDecoding) return;
-
             if (UIElements.videoFeed.readyState === UIElements.videoFeed.HAVE_ENOUGH_DATA) {
                 const canvas = UIElements.hiddenCanvas;
                 const ctx = canvas.getContext('2d');
                 canvas.height = UIElements.videoFeed.videoHeight;
                 canvas.width = UIElements.videoFeed.videoWidth;
                 ctx.drawImage(UIElements.videoFeed, 0, 0, canvas.width, canvas.height);
-                
                 const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                 const code = jsQR(imageData.data, imageData.width, imageData.height);
-
-                if (code) {
-                    processDecodedPacket(code.data);
-                }
+                if (code) processDecodedPacket(code.data);
             }
             currentState.animationFrameId = requestAnimationFrame(decodeFrame);
         }
@@ -402,40 +397,33 @@
         function processDecodedPacket(packet) {
             try {
                 const parts = packet.split(':');
-                if (parts.length !== 4) return;
+                if (parts.length !== 5) return;
 
-                const [total, indexStr, hash, payload] = parts;
+                const [total, indexStr, hash, fileName, payload] = parts;
                 const index = parseInt(indexStr, 10);
                 
                 if (currentState.totalChunks === 0) {
                     currentState.totalChunks = parseInt(total, 10);
                     currentState.fileHash = hash;
+                    currentState.decodedFileName = fileName;
                     UIElements.progressContainer.style.display = 'block';
-                    log(`Discovered stream: ${currentState.totalChunks} total chunks.`);
+                    log(`Discovered stream for "${fileName}": ${currentState.totalChunks} total chunks.`);
                 }
                 
                 if (!currentState.receivedChunks.has(index)) {
                     if (navigator.vibrate) navigator.vibrate(50);
-                    
                     const binaryString = atob(payload);
                     const chunkData = new Uint8Array(binaryString.length);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        chunkData[i] = binaryString.charCodeAt(i);
-                    }
+                    for (let i = 0; i < binaryString.length; i++) chunkData[i] = binaryString.charCodeAt(i);
                     currentState.receivedChunks.set(index, chunkData);
 
-                    // UPDATE PROGRESS BAR AND STATUS
                     const progress = (currentState.receivedChunks.size / currentState.totalChunks) * 100;
                     UIElements.progressBar.style.width = `${progress}%`;
-                    UIElements.decoderStatus.textContent = `Receiving... ${currentState.receivedChunks.size} / ${currentState.totalChunks}`;
+                    UIElements.decoderStatus.textContent = `Receiving "${currentState.decodedFileName}"... ${currentState.receivedChunks.size} / ${currentState.totalChunks}`;
                     
-                    if (currentState.receivedChunks.size === currentState.totalChunks) {
-                        finishDecoding();
-                    }
+                    if (currentState.receivedChunks.size === currentState.totalChunks) finishDecoding();
                 }
-            } catch (e) {
-                // Ignore packet processing errors, they are common
-            }
+            } catch (e) { /* Ignore packet errors */ }
         }
         
         async function finishDecoding() {
@@ -445,36 +433,34 @@
             UIElements.videoFeed.srcObject.getTracks().forEach(track => track.stop());
 
             const sortedChunks = Array.from({ length: currentState.totalChunks }, (_, i) => currentState.receivedChunks.get(i));
-
-            const totalLength = sortedChunks.reduce((acc, val) => acc + val.length, 0);
+            const totalLength = sortedChunks.reduce((acc, val) => acc + (val ? val.length : 0), 0);
             const compressedData = new Uint8Array(totalLength);
             let offset = 0;
             for (const chunk of sortedChunks) {
-                compressedData.set(chunk, offset);
-                offset += chunk.length;
+                if (chunk) { compressedData.set(chunk, offset); offset += chunk.length; }
             }
-
+            
             UIElements.decoderStatus.textContent = 'Verifying file integrity...';
             const receivedHash = await generateSHA256(compressedData);
-
             if (receivedHash === currentState.fileHash) {
                 log('Hash verification successful!', 'success');
                 UIElements.decoderStatus.textContent = 'Decompressing...';
                 const originalData = pako.inflate(compressedData, { to: 'string' });
-                currentState.decodedFileBlob = new Blob([originalData], { type: 'application/json' });
+                const mimeType = currentState.decodedFileName.endsWith('.json') ? 'application/json' : 'text/plain';
+                currentState.decodedFileBlob = new Blob([originalData], { type: mimeType });
                 
                 UIElements.downloadBtn.disabled = false;
                 UIElements.downloadBtn.onclick = () => {
                     const url = URL.createObjectURL(currentState.decodedFileBlob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = 'dictionary.json';
+                    a.download = currentState.decodedFileName;
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                 };
-                UIElements.decoderStatus.innerHTML = `File ready! (${(currentState.decodedFileBlob.size / 1024 / 1024).toFixed(2)} MB)<br>Click Download.`;
+                UIElements.decoderStatus.innerHTML = `File ready! (${(currentState.decodedFileBlob.size / 1024).toFixed(1)} KB)<br>Click Download.`;
             } else {
                 log('HASH MISMATCH! Data is corrupted.', 'error');
                 UIElements.decoderStatus.textContent = 'Verification Failed!';
@@ -482,8 +468,6 @@
         }
 
         UIElements.startDecodingBtn.onclick = startDecoding;
-
-        // --- Initial setup ---
         switchMode('encoder');
     </script>
 </body>
